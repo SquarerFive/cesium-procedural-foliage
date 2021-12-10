@@ -98,14 +98,14 @@ void AFoliageCaptureActor::BuildFoliageTransforms(UTextureRenderTarget2D* Foliag
 	}
 
 	// Find the geographic bounds of the RT
-	const glm::dvec3 MinGeographic = Georeference->TransformUeToLongitudeLatitudeHeight(
+	const glm::dvec3 MinGeographic = Georeference->TransformUnrealToLongitudeLatitudeHeight(
 		glm::dvec3(
 			RTWorldBounds.Min.X,
 			RTWorldBounds.Min.Y,
 			RTWorldBounds.Min.Z
 		));
 
-	const glm::dvec3 MaxGeographic = Georeference->TransformUeToLongitudeLatitudeHeight(
+	const glm::dvec3 MaxGeographic = Georeference->TransformUnrealToLongitudeLatitudeHeight(
 		glm::dvec3(
 			RTWorldBounds.Max.X,
 			RTWorldBounds.Max.Y,
@@ -157,7 +157,7 @@ void AFoliageCaptureActor::BuildFoliageTransforms(UTextureRenderTarget2D* Foliag
 				const glm::dvec3 GeographicCoords = PixelToGeographicLocation(X, Y, Elevation, FoliageDistributionMap,
 				                                                              GeographicExtents2D);
 				// Then project to UE world coordinates
-				const glm::dvec3 EngineCoords = Georeference->TransformLongitudeLatitudeHeightToUe(GeographicCoords);
+				const glm::dvec3 EngineCoords = Georeference->TransformLongitudeLatitudeHeightToUnreal(GeographicCoords);
 
 				// Compute east north up
 				const FMatrix EastNorthUpEngine = Georeference->InaccurateComputeEastNorthUpToUnreal(
@@ -332,8 +332,8 @@ void AFoliageCaptureActor::OnUpdate_Implementation(const FVector& NewLocation)
 	const FVector End = GetActorTransform().TransformPosition(FVector((CaptureWidth * Size) / 2, 0, 0));
 
 	// Find the distance (in degrees) between the grid min and max.
-	glm::dvec3 GeoStart = Georeference->TransformUeToLongitudeLatitudeHeight(VectorToDVector(Start));
-	glm::dvec3 GeoEnd = Georeference->TransformUeToLongitudeLatitudeHeight(VectorToDVector(End));
+	glm::dvec3 GeoStart = Georeference->TransformUnrealToLongitudeLatitudeHeight(VectorToDVector(Start));
+	glm::dvec3 GeoEnd = Georeference->TransformUnrealToLongitudeLatitudeHeight(VectorToDVector(End));
 	
 	GeoStart.z = CaptureElevation;
 	GeoEnd.z = CaptureElevation;

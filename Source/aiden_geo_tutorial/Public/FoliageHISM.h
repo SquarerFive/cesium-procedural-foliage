@@ -23,4 +23,7 @@ public:
 
 	UPROPERTY()
 	bool bMarkedForClear = false;
+
+	UPROPERTY()
+		bool bCleared = false;
 };

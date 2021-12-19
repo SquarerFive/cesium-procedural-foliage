@@ -17,6 +17,17 @@ void AFoliageCaptureActor::BeginPlay()
 {
 	Super::BeginPlay();
 	ResetAndCreateHISMComponents();
+
+	FCoreDelegates::PreWorldOriginOffset.AddLambda([&](UWorld* World, FIntVector CurrentOrigin, FIntVector NewOrigin) {
+		bIsRebasing = true;
+		
+		WorldOffset = FVector(NewOrigin - CurrentOrigin);
+		});
+
+	FCoreDelegates::PostWorldOriginOffset.AddLambda([&](UWorld* World, FIntVector CurrentOrigin, FIntVector NewOrigin) {
+		bIsRebasing = false;
+		WorldOffset = FVector(0.);
+	});
 }
 
 // Called every frame
@@ -36,16 +47,23 @@ void AFoliageCaptureActor::Tick(float DeltaTime)
 				// if (!IsValid(FoliageHISM)) { continue; }
 				if (FoliageHISM->bMarkedForClear)
 				{
+#if !FOLIAGE_REDUCE_FLICKER_APPROACH_ENABLED
 					FoliageHISM->ClearInstances();
+					FoliageHISM->bCleared = true;
 					FoliageHISM->bMarkedForClear = false;
 					ComponentsUpdated++;
+#endif
 				}
 				else if (FoliageHISM->bMarkedForAdd)
 				{
+#if FOLIAGE_REDUCE_FLICKER_APPROACH_ENABLED
+					FoliageHISM->ClearInstances();
+#endif
 					FoliageHISM->PreAllocateInstancesMemory(FoliageHISM->Transforms.Num());
 					FoliageHISM->AddInstances(FoliageHISM->Transforms, false);
 					FoliageHISM->bMarkedForAdd = false;
 					FoliageHISM->Transforms.Empty();
+					FoliageHISM->bCleared = false;
 					ComponentsUpdated++;
 				}
 				if (ComponentsUpdated > MaxComponentsToUpdatePerFrame)
@@ -58,13 +76,19 @@ void AFoliageCaptureActor::Tick(float DeltaTime)
 				break;
 			}
 		}
+
+		if (IsValid(Georeference)) {
+			if (AllISMsMarkedAsCleared() && !bInstancesClearedCalled && IsWaiting()) {
+				OnInstancesCleared();
+			}
+		}
 	}
 
 	Ticks++;
 }
 
 void AFoliageCaptureActor::BuildFoliageTransforms(UTextureRenderTarget2D* FoliageDistributionMap,
-                                                  UTextureRenderTarget2D* NormalAndDepthMap, FBox RTWorldBounds)
+	UTextureRenderTarget2D* NormalAndDepthMap, FBox RTWorldBounds)
 {
 	// Need to check whether the CesiumGeoreference actor and input RTs are valid.
 	if (!IsValid(Georeference))
@@ -82,20 +106,8 @@ void AFoliageCaptureActor::BuildFoliageTransforms(UTextureRenderTarget2D* Foliag
 		UE_LOG(LogTemp, Warning, TEXT("No foliage types added!"));
 		return;
 	}
-	
+
 	bIsBuilding = true;
-	// Ensure the transforms array on the HISMs are cleared before building.
-	for (TPair<FFoliageGeometryType, TArray<UFoliageHISM*>>& FoliageHISMPair : HISMFoliageMap)
-	{
-		for (UFoliageHISM* FoliageHISM : FoliageHISMPair.Value)
-		{
-			if (IsValid(FoliageHISM))
-			{
-				FoliageHISM->Transforms.Empty();
-				FoliageHISM->bMarkedForClear = true;
-			}
-		}
-	}
 
 	// Find the geographic bounds of the RT
 	const glm::dvec3 MinGeographic = Georeference->TransformUnrealToLongitudeLatitudeHeight(
@@ -126,7 +138,7 @@ void AFoliageCaptureActor::BuildFoliageTransforms(UTextureRenderTarget2D* Foliag
 	FOnRenderTargetRead OnRenderTargetRead;
 	OnRenderTargetRead.BindLambda(
 		[this, FoliageDistributionMap, ClassificationPixels, NormalPixels, GeographicExtents2D, TotalPixels](
-		bool bSuccess) mutable
+			bool bSuccess) mutable
 		{
 			if (!bSuccess)
 			{
@@ -138,7 +150,7 @@ void AFoliageCaptureActor::BuildFoliageTransforms(UTextureRenderTarget2D* Foliag
 
 			TMap<UFoliageHISM*, int32> NewInstanceCountMap;
 			FFoliageTransforms FoliageTransforms;
-			
+
 			for (int Index = 0; Index < TotalPixels; ++Index)
 			{
 				// Get the 2D pixel coordinates.
@@ -155,13 +167,15 @@ void AFoliageCaptureActor::BuildFoliageTransforms(UTextureRenderTarget2D* Foliag
 
 				// Project pixel coords to geographic.
 				const glm::dvec3 GeographicCoords = PixelToGeographicLocation(X, Y, Elevation, FoliageDistributionMap,
-				                                                              GeographicExtents2D);
+					GeographicExtents2D);
 				// Then project to UE world coordinates
 				const glm::dvec3 EngineCoords = Georeference->TransformLongitudeLatitudeHeightToUnreal(GeographicCoords);
 
 				// Compute east north up
 				const FMatrix EastNorthUpEngine = Georeference->InaccurateComputeEastNorthUpToUnreal(
 					FVector(EngineCoords.x, EngineCoords.y, EngineCoords.z));
+
+
 
 				for (FFoliageClassificationType& FoliageType : FoliageTypes)
 				{
@@ -186,11 +200,12 @@ void AFoliageCaptureActor::BuildFoliageTransforms(UTextureRenderTarget2D* Foliag
 							// Find rotation and scale
 							const float Scale = FoliageGeometryType.Scale.Interpolate(FMath::FRand());
 							FRotator Rotation;
-							
+
 							if (FoliageGeometryType.bAlignToNormal)
 							{
 								Rotation = UKismetMathLibrary::MakeRotFromZ(Normal);
-							} else
+							}
+							else
 							{
 								Rotation = EastNorthUpEngine.Rotator();
 							}
@@ -205,13 +220,13 @@ void AFoliageCaptureActor::BuildFoliageTransforms(UTextureRenderTarget2D* Foliag
 							}
 
 							// Find HISM with minimum amount of transforms.
-							
+
 							UFoliageHISM* MinimumHISM = HISMFoliageMap[FoliageGeometryType][0];
 							for (UFoliageHISM* HISM : HISMFoliageMap[FoliageGeometryType])
 							{
 								if (FoliageTransforms.HISMTransformMap.Contains(HISM) && FoliageTransforms.HISMTransformMap.Contains(MinimumHISM))
 								{
-									if (FoliageTransforms.HISMTransformMap[HISM].Num() < FoliageTransforms.HISMTransformMap[HISM].Num())
+									if (FoliageTransforms.HISMTransformMap[HISM].Num() < FoliageTransforms.HISMTransformMap[MinimumHISM].Num())
 									{
 										MinimumHISM = HISM;
 									}
@@ -222,19 +237,23 @@ void AFoliageCaptureActor::BuildFoliageTransforms(UTextureRenderTarget2D* Foliag
 								UE_LOG(LogTemp, Error, TEXT("MinimumHISM is invalid!"));
 							}
 
+							Location += WorldOffset;
+
 							// Add our transform, and make it relative to the actor.
 							FTransform NewTransform = FTransform(
 								Rotation,
 								Location + (Rotation.Quaternion().
 									GetUpVector() * FoliageGeometryType.ZOffset.
-									                                    Interpolate(FMath::FRand())), FVector(Scale)
+									Interpolate(FMath::FRand())), FVector(Scale)
 							).GetRelativeTransform(GetTransform());
+
 							if (NewTransform.IsRotationNormalized())
 							{
 								if (!FoliageTransforms.HISMTransformMap.Contains(MinimumHISM))
 								{
-									FoliageTransforms.HISMTransformMap.Add(MinimumHISM, TArray{NewTransform});
-								} else
+									FoliageTransforms.HISMTransformMap.Add(MinimumHISM, TArray{ NewTransform });
+								}
+								else
 								{
 									FoliageTransforms.HISMTransformMap[MinimumHISM].Add(NewTransform);
 								}
@@ -249,23 +268,39 @@ void AFoliageCaptureActor::BuildFoliageTransforms(UTextureRenderTarget2D* Foliag
 			NormalPixels = nullptr;
 
 			AsyncTask(ENamedThreads::GameThread, [FoliageTransforms, this]()
-			{
-				// Marked for add
-				for (const TPair<UFoliageHISM*, TArray<FTransform>>& Pair: FoliageTransforms.HISMTransformMap)
 				{
-					Pair.Key->Transforms.Append(Pair.Value);
-					Pair.Key->bMarkedForAdd = true;
-				}
-				bIsBuilding = false;
-			});
+					// Marked for add
+					for (const TPair<UFoliageHISM*, TArray<FTransform>>& Pair : FoliageTransforms.HISMTransformMap)
+					{
+						Pair.Key->Transforms.Append(Pair.Value);
+						Pair.Key->bMarkedForAdd = true;
+					}
+					bIsBuilding = false;
+				});
 		});
 	// Extract the pixels from the render targets, calling OnRenderTargetRead when complete.
 	ReadLinearColorPixelsAsync(OnRenderTargetRead, TArray<FTextureRenderTargetResource*>{
-		                           FoliageDistributionMap->GameThread_GetRenderTargetResource(),
-		                           NormalAndDepthMap->GameThread_GetRenderTargetResource()
-	                           }, TArray<TArray<FLinearColor>*>{
-		                           ClassificationPixels, NormalPixels
-	                           });
+		FoliageDistributionMap->GameThread_GetRenderTargetResource(),
+			NormalAndDepthMap->GameThread_GetRenderTargetResource()
+	}, TArray<TArray<FLinearColor>*>{
+		ClassificationPixels, NormalPixels
+	});
+}
+
+void AFoliageCaptureActor::ClearFoliageInstances()
+{
+	// Ensure the transforms array on the HISMs are cleared before building.
+	for (TPair<FFoliageGeometryType, TArray<UFoliageHISM*>>& FoliageHISMPair : HISMFoliageMap)
+	{
+		for (UFoliageHISM* FoliageHISM : FoliageHISMPair.Value)
+		{
+			if (IsValid(FoliageHISM))
+			{
+				FoliageHISM->Transforms.Empty();
+				FoliageHISM->bMarkedForClear = true;
+			}
+		}
+	}
 }
 
 void AFoliageCaptureActor::ResetAndCreateHISMComponents()
@@ -296,8 +331,8 @@ void AFoliageCaptureActor::ResetAndCreateHISMComponents()
 
 				HISM->SetStaticMesh(FoliageGeometryType.Mesh);
 				HISM->SetCollisionEnabled(FoliageGeometryType.bCollidesWithWorld
-					                          ? ECollisionEnabled::QueryAndPhysics
-					                          : ECollisionEnabled::NoCollision);
+					? ECollisionEnabled::QueryAndPhysics
+					: ECollisionEnabled::NoCollision);
 				HISM->SetCullDistances(FoliageGeometryType.CullingDistances.Min, FoliageGeometryType.CullingDistances.Max);
 
 				// This may cause a slight hitch when enabled.
@@ -318,7 +353,10 @@ void AFoliageCaptureActor::ResetAndCreateHISMComponents()
 void AFoliageCaptureActor::OnUpdate_Implementation(const FVector& NewLocation)
 {
 	// Align the actor to face the planet surface.
-	SetActorLocation(NewLocation);
+	// SetActorLocation(NewLocation);
+	NewActorLocation = NewLocation;
+	bInstancesClearedCalled = false;
+	
 
 	const FRotator PlanetAlignedRotation = Georeference->InaccurateComputeEastNorthUpToUnreal(NewLocation).Rotator();
 
@@ -334,16 +372,53 @@ void AFoliageCaptureActor::OnUpdate_Implementation(const FVector& NewLocation)
 	// Find the distance (in degrees) between the grid min and max.
 	glm::dvec3 GeoStart = Georeference->TransformUnrealToLongitudeLatitudeHeight(VectorToDVector(Start));
 	glm::dvec3 GeoEnd = Georeference->TransformUnrealToLongitudeLatitudeHeight(VectorToDVector(End));
-	
+
 	GeoStart.z = CaptureElevation;
 	GeoEnd.z = CaptureElevation;
-	
+
 	CaptureWidthInDegrees = glm::distance(GeoStart, GeoEnd) / 2;
+
+	bIsWaiting = true;
+	
+#if FOLIAGE_REDUCE_FLICKER_APPROACH_ENABLED
+	OnInstancesCleared();
+#else
+	ClearFoliageInstances();
+#endif
+}
+
+void AFoliageCaptureActor::OnInstancesCleared_Implementation()
+{
+	if (NewActorLocation.IsSet()) {
+		glm::dvec3 GeoPosition = Georeference->TransformUnrealToLongitudeLatitudeHeight(
+			VectorToDVector(*NewActorLocation)
+		);
+		GeoPosition.z = CaptureElevation;
+		glm::dvec3 EnginePosition = Georeference->TransformLongitudeLatitudeHeightToUnreal(GeoPosition);
+		FVector EnginePositionVector = FVector(EnginePosition.x, EnginePosition.y, EnginePosition.z);
+		ActorOffset = EnginePositionVector - GetActorLocation();
+
+		SetActorLocation(
+			EnginePositionVector
+		);
+
+#if FOLIAGE_REDUCE_FLICKER_APPROACH_ENABLED
+		OffsetAllInstances(ActorOffset);
+#endif
+
+		NewActorLocation.Reset();
+		bIsWaiting = false;
+	}
 }
 
 bool AFoliageCaptureActor::IsBuilding() const
 {
 	return bIsBuilding;
+}
+
+bool AFoliageCaptureActor::IsWaiting() const
+{
+	return bIsWaiting;
 }
 
 void AFoliageCaptureActor::CorrectFoliageTransform(const FVector& InEngineCoordinates, const FMatrix& InEastNorthUp,
@@ -355,10 +430,10 @@ void AFoliageCaptureActor::CorrectFoliageTransform(const FVector& InEngineCoordi
 	{
 		const FVector Up = InEastNorthUp.ToQuat().GetUpVector();
 		FHitResult HitResult;
-		
+
 		World->LineTraceSingleByChannel(HitResult, InEngineCoordinates + (Up * 6000),
 			InEngineCoordinates - (Up * 6000), ECollisionChannel::ECC_Visibility);
-		
+
 		if (HitResult.bBlockingHit)
 		{
 			bSuccess = true;
@@ -371,11 +446,12 @@ void AFoliageCaptureActor::CorrectFoliageTransform(const FVector& InEngineCoordi
 double AFoliageCaptureActor::GetHeightFromDepth(const double& Value) const
 {
 	return CaptureElevation - (1 - Value) / 0.00001 / 100;
+
 }
 
 glm::dvec3 AFoliageCaptureActor::PixelToGeographicLocation(const double& X, const double& Y, const double& Altitude,
-                                                           UTextureRenderTarget2D* RT,
-                                                           const glm::dvec4& GeographicExtents) const
+	UTextureRenderTarget2D* RT,
+	const glm::dvec4& GeographicExtents) const
 {
 	// Normalize the ranges of the coords
 	const double AX = X / static_cast<double>(RT->SizeX);
@@ -394,8 +470,8 @@ glm::dvec3 AFoliageCaptureActor::PixelToGeographicLocation(const double& X, cons
 }
 
 FIntPoint AFoliageCaptureActor::GeographicToPixelLocation(const double& Longitude, const double& Latitude,
-                                                          UTextureRenderTarget2D* RT,
-                                                          const glm::dvec4& GeographicExtents) const
+	UTextureRenderTarget2D* RT,
+	const glm::dvec4& GeographicExtents) const
 {
 	// Normalize long and lat
 	const double LongitudeRange = GeographicExtents.z - GeographicExtents.x;

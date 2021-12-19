@@ -43,8 +43,10 @@ void AProceduralFoliageEllipsoid::Tick(float DeltaSeconds)
 				// New capture position
 				const glm::dvec3 NewFoliageCaptureUELocation = Geo->TransformLongitudeLatitudeHeightToUnreal(GeographicCameraLocation);
 
+				FoliageCaptureActor->PlayerSpeed = Speed;
+
 				// Only update the foliage capture actor if the player is outside of the capture grid, within elevation and a speed less than 5000.
-				if ((Distance > FoliageCaptureActor->CaptureWidthInDegrees && CurrentCameraElevation <= FoliageCaptureActor->CaptureElevation && Speed < 5000) || !bHasFoliageSpawned)
+				if ((Distance > FoliageCaptureActor->CaptureWidthInDegrees/2 && CurrentCameraElevation <= FoliageCaptureActor->CaptureElevation && Speed < FoliageCaptureActor->PlayerSpeedUpdateThreshold && !FoliageCaptureActor->IsWaiting()) || !bHasFoliageSpawned)
 				{
 					FoliageCaptureActor->OnUpdate(FVector(NewFoliageCaptureUELocation.x, NewFoliageCaptureUELocation.y, NewFoliageCaptureUELocation.z));
 					bHasFoliageSpawned = true;

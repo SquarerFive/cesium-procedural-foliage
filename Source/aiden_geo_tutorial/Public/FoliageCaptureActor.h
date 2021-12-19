@@ -12,6 +12,9 @@
 
 #include "FoliageCaptureActor.generated.h"
 
+// EXPERIMENTAL
+#define FOLIAGE_REDUCE_FLICKER_APPROACH_ENABLED 0
+
 /**
  * @brief Used to store the reprojected points gathered from the RT.
  */
@@ -19,6 +22,7 @@ USTRUCT(BlueprintType)
 struct FFoliageTransforms
 {
 	GENERATED_BODY()
+
 	TMap<UFoliageHISM*, TArray<FTransform>> HISMTransformMap;
 };
 
@@ -167,9 +171,25 @@ public:
 	FIntVector GridSize = FIntVector(0, 0, 0);
 
 	/**
+	* @brief Set to true if origin rebasing is enabled within the project.
+	* Set to disabled if not needed to save performance.
+	*/
+	UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Foliage Spawner")
+	bool bIsRebasing = true;
+
+	/**
 	* @brief Average geographic width in degrees.
 	*/
 	double CaptureWidthInDegrees = 0.01;
+
+	/**
+	* @brief Camera speed
+	*/
+	double PlayerSpeed = 0.0;
+	/**
+	* @brief Camera speed threshold, we should only update if the speed is below this threshold 
+	*/
+	double PlayerSpeedUpdateThreshold = 5000;
 
 public:
 	/**
@@ -181,6 +201,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Foliage Spawner")
 	void BuildFoliageTransforms(UTextureRenderTarget2D* FoliageDistributionMap,
 	                            UTextureRenderTarget2D* NormalAndDepthMap, FBox RTWorldBounds);
+	
+	UFUNCTION(BlueprintCallable, Category = "Foliage Spawner")
+	void ClearFoliageInstances();
 
 	/**
 	 * @brief Create required HISM components, removing if outdated
@@ -193,11 +216,20 @@ public:
 	UFUNCTION(BlueprintCallable, BlueprintNativeEvent, Category = "Foliage Spawner")
 	void OnUpdate(const FVector& NewLocation);
 
+	UFUNCTION(BlueprintCallable, BlueprintNativeEvent, Category = "Foliage Spawner")
+	void OnInstancesCleared();
+
 	/**
 	 * @brief Is the foliage currently building?
 	 */
 	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Foliage Spawner")
 	bool IsBuilding() const;
+
+	/*
+	* @brief Are we waiting to be built?
+	*/
+	UFUNCTION(BlueprintCallable, BlueprintPure, Category = "Foliage Spawner")
+	bool IsWaiting() const;
 
 protected:
 	/**
@@ -248,7 +280,14 @@ protected:
 	/**
 	 * @brief Don't run tick update if true.
 	 */
+	UPROPERTY(BlueprintReadOnly, VisibleAnywhere, Category = "Foliage Spawner")
 	bool bIsBuilding = false;
+
+	/**
+	* @brief If we are waiting to build foliage
+	*/
+	UPROPERTY(BlueprintReadOnly, VisibleAnywhere, Category = "Foliage Spawner")
+	bool bIsWaiting = false;
 
 	/**
 	 * @brief Number of frames that have passed after updating foliage.
@@ -257,24 +296,79 @@ protected:
 
 	static glm::dvec3 VectorToDVector(const FVector& InVector);
 
-	int32 GetInstanceCount(float Delta);
+	/**
+	* @brief Gets the total instance count
+	*/
+	int32 GetInstanceCount();
+
+	/**
+	* @brief Are all ISMs marked as cleared
+	*/
+	bool AllISMsMarkedAsCleared();
+
+	/**
+	* @brief Offset all instances
+	*/
+	void OffsetAllInstances(const FVector& InOffset);
+
+	TOptional<FVector> NewActorLocation;
+
+	bool bInstancesClearedCalled = false;
+
+	/**
+	* @brief Offset between the current world origin and the last world origin. Fixed to 0 if rebasing isn't enabled.
+	*/
+	FVector WorldOffset = FVector(0.f);
+	/**
+	* @brief Offset between last actor position and current actor position.
+	*/
+	FVector ActorOffset = FVector(0.f);
 };
 
-inline int32 AFoliageCaptureActor::GetInstanceCount(float Delta)
+inline int32 AFoliageCaptureActor::GetInstanceCount()
 {
 	int32 Count = 0;
-	bool bAnyHISMValid = false;
-	for (auto T : HISMFoliageMap)
+	for (TPair<FFoliageGeometryType, TArray<UFoliageHISM*>>& FoliageHISMPair : HISMFoliageMap)
 	{
-		for (auto V : T.Value)
-		{
-			if (IsValid(V))
-			{
-				Count += V->GetInstanceCount();
-				bAnyHISMValid = true;
-			}
+		for (UFoliageHISM* FoliageHISM : FoliageHISMPair.Value) {
+			Count += FoliageHISM->GetInstanceCount();
 		}
 	}
+	return Count;
+}
 
-	return bAnyHISMValid ? Count : -1;
+inline bool AFoliageCaptureActor::AllISMsMarkedAsCleared()
+{
+	bool bIsCleared = true;
+	for (TPair<FFoliageGeometryType, TArray<UFoliageHISM*>>& FoliageHISMPair : HISMFoliageMap)
+	{
+		for (UFoliageHISM* FoliageHISM : FoliageHISMPair.Value) {
+			if (!FoliageHISM->bCleared) {
+				bIsCleared = false;
+				break;
+			}
+		}
+		if (!bIsCleared) {
+			break;
+		}
+	}
+	return bIsCleared;
+}
+
+inline void AFoliageCaptureActor::OffsetAllInstances(const FVector& InOffset)
+{
+	for (TPair<FFoliageGeometryType, TArray<UFoliageHISM*>>& FoliageHISMPair : HISMFoliageMap)
+	{
+		for (UFoliageHISM* FoliageHISM : FoliageHISMPair.Value) {
+			TArray<FTransform> WorldTransforms;
+			WorldTransforms.SetNum(FoliageHISM->GetInstanceCount());
+			ParallelFor(WorldTransforms.Num(), [&](int32 Index) {
+				FoliageHISM->GetInstanceTransform(Index, WorldTransforms[Index], true);
+				WorldTransforms[Index].SetLocation(
+					WorldTransforms[Index].GetLocation() + InOffset
+				);
+				});
+			FoliageHISM->BatchUpdateInstancesTransforms(0, WorldTransforms, true, true, true);
+		}
+	}
 }

@@ -13,7 +13,7 @@
 #include "FoliageCaptureActor.generated.h"
 
 // EXPERIMENTAL
-#define FOLIAGE_REDUCE_FLICKER_APPROACH_ENABLED 0
+#define FOLIAGE_REDUCE_FLICKER_APPROACH_ENABLED 1
 
 /**
  * @brief Used to store the reprojected points gathered from the RT.
@@ -256,7 +256,7 @@ protected:
 	/**
 	 * @brief Converts pixel coordinates back to geographic coordinates.
 	 */
-	glm::dvec3 PixelToGeographicLocation(const double& X, const double& Y, const double& Altitude,
+	FVector PixelToGeographicLocation(const double& X, const double& Y, const double& Altitude,
 	                                     UTextureRenderTarget2D* RT, const glm::dvec4& GeographicExtents) const;
 	/**
 	 * @brief Converts geographic coordinates to pixel coordinates.

@@ -136,6 +136,7 @@ void AFoliageCaptureActor::BuildFoliageTransforms(UTextureRenderTarget2D* Foliag
 	TArray<FLinearColor>* NormalPixels = new TArray<FLinearColor>();
 
 	FOnRenderTargetRead OnRenderTargetRead;
+	
 	OnRenderTargetRead.BindLambda(
 		[this, FoliageDistributionMap, ClassificationPixels, NormalPixels, GeographicExtents2D, TotalPixels](
 			bool bSuccess) mutable
@@ -154,8 +155,8 @@ void AFoliageCaptureActor::BuildFoliageTransforms(UTextureRenderTarget2D* Foliag
 			for (int Index = 0; Index < TotalPixels; ++Index)
 			{
 				// Get the 2D pixel coordinates.
-				const double X = Index % Width;
-				const double Y = Index / Width;
+				const double X = (Index % Width);
+				const double Y = (Index / Width);
 
 				// Extract classification, normals and depth from the pixel arrays.
 				const FLinearColor Classification = (*ClassificationPixels)[Index];
@@ -164,18 +165,15 @@ void AFoliageCaptureActor::BuildFoliageTransforms(UTextureRenderTarget2D* Foliag
 				FVector Normal = FVector(NormalDepth.R, NormalDepth.G, NormalDepth.B);
 				// Project the Alpha channel in NormalDepth to elevation (in metres) 
 				const double Elevation = GetHeightFromDepth(NormalDepth.A);
-
+				
 				// Project pixel coords to geographic.
-				const glm::dvec3 GeographicCoords = PixelToGeographicLocation(X, Y, Elevation, FoliageDistributionMap,
+				const FVector GeographicCoords = PixelToGeographicLocation(X, Y, Elevation, FoliageDistributionMap,
 					GeographicExtents2D);
 				// Then project to UE world coordinates
-				const glm::dvec3 EngineCoords = Georeference->TransformLongitudeLatitudeHeightToUnreal(GeographicCoords);
+				FVector Location = Georeference->TransformLongitudeLatitudeHeightToUnreal(GeographicCoords);
 
 				// Compute east north up
-				const FMatrix EastNorthUpEngine = Georeference->InaccurateComputeEastNorthUpToUnreal(
-					FVector(EngineCoords.x, EngineCoords.y, EngineCoords.z));
-
-
+				const FMatrix EastNorthUpEngine = Georeference->ComputeEastNorthUpToUnreal(Location);
 
 				for (FFoliageClassificationType& FoliageType : FoliageTypes)
 				{
@@ -183,7 +181,6 @@ void AFoliageCaptureActor::BuildFoliageTransforms(UTextureRenderTarget2D* Foliag
 					if (Classification == FoliageType.ColourClassification)
 					{
 						bool bHasDoneRaycast = false;
-						FVector Location = FVector(EngineCoords.x, EngineCoords.y, EngineCoords.z);
 
 						if (FoliageType.bAlignToSurfaceWithRaycast)
 						{
@@ -358,7 +355,7 @@ void AFoliageCaptureActor::OnUpdate_Implementation(const FVector& NewLocation)
 	bInstancesClearedCalled = false;
 	
 
-	const FRotator PlanetAlignedRotation = Georeference->InaccurateComputeEastNorthUpToUnreal(NewLocation).Rotator();
+	const FRotator PlanetAlignedRotation = Georeference->ComputeEastNorthUpToUnreal(NewLocation).Rotator();
 
 	SetActorRotation(
 		PlanetAlignedRotation
@@ -390,16 +387,15 @@ void AFoliageCaptureActor::OnUpdate_Implementation(const FVector& NewLocation)
 void AFoliageCaptureActor::OnInstancesCleared_Implementation()
 {
 	if (NewActorLocation.IsSet()) {
-		glm::dvec3 GeoPosition = Georeference->TransformUnrealToLongitudeLatitudeHeight(
-			VectorToDVector(*NewActorLocation)
+		FVector GeoPosition = Georeference->TransformUnrealToLongitudeLatitudeHeight(
+			*NewActorLocation
 		);
-		GeoPosition.z = CaptureElevation;
-		glm::dvec3 EnginePosition = Georeference->TransformLongitudeLatitudeHeightToUnreal(GeoPosition);
-		FVector EnginePositionVector = FVector(EnginePosition.x, EnginePosition.y, EnginePosition.z);
-		ActorOffset = EnginePositionVector - GetActorLocation();
+		GeoPosition.Z = CaptureElevation;
+		FVector EnginePosition = Georeference->TransformLongitudeLatitudeHeightToUnreal(GeoPosition);
+		ActorOffset = EnginePosition - GetActorLocation();
 
 		SetActorLocation(
-			EnginePositionVector
+		EnginePosition
 		);
 
 #if FOLIAGE_REDUCE_FLICKER_APPROACH_ENABLED
@@ -449,7 +445,7 @@ double AFoliageCaptureActor::GetHeightFromDepth(const double& Value) const
 
 }
 
-glm::dvec3 AFoliageCaptureActor::PixelToGeographicLocation(const double& X, const double& Y, const double& Altitude,
+FVector AFoliageCaptureActor::PixelToGeographicLocation(const double& X, const double& Y, const double& Altitude,
 	UTextureRenderTarget2D* RT,
 	const glm::dvec4& GeographicExtents) const
 {
@@ -466,7 +462,7 @@ glm::dvec3 AFoliageCaptureActor::PixelToGeographicLocation(const double& X, cons
 		GeographicExtents.w,
 		AX);
 
-	return glm::dvec3(Long, Lat, Altitude);
+	return FVector(Long, Lat, Altitude);
 }
 
 FIntPoint AFoliageCaptureActor::GeographicToPixelLocation(const double& Longitude, const double& Latitude,
@@ -522,6 +518,8 @@ void AFoliageCaptureActor::ReadLinearColorPixelsAsync(
 		return;
 	}
 
+	FRenderCommandFence Fence;
+
 	ENQUEUE_RENDER_COMMAND(ReadSurfaceCommand)(
 		[Context, OnRenderTargetRead, ExitThread](FRHICommandListImmediate& RHICmdList)
 		{
@@ -530,10 +528,11 @@ void AFoliageCaptureActor::ReadLinearColorPixelsAsync(
 			int i = 0;
 			for (FRenderTarget* RT : Context.SrcRenderTargets)
 			{
+				
 				const FTexture2DRHIRef& RefRenderTarget = RT->
 					GetRenderTargetTexture();
-				TArray<FLinearColor>* Buffer = Context.OutData[i];
 
+				TArray<FLinearColor>* Buffer = Context.OutData[i];
 				RHICmdList.ReadSurfaceData(
 					RefRenderTarget,
 					Rect,
@@ -550,6 +549,9 @@ void AFoliageCaptureActor::ReadLinearColorPixelsAsync(
 					OnRenderTargetRead.Execute((*Context.OutData[0]).Num() > 0);
 				});
 		});
+
+	Fence.BeginFence(true);
+	
 }
 
 glm::dvec3 AFoliageCaptureActor::VectorToDVector(const FVector& InVector)

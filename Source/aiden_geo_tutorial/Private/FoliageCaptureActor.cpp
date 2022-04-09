@@ -382,6 +382,7 @@ void AFoliageCaptureActor::OnUpdate_Implementation(const FVector& NewLocation)
 #else
 	ClearFoliageInstances();
 #endif
+
 }
 
 void AFoliageCaptureActor::OnInstancesCleared_Implementation()

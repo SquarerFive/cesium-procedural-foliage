@@ -170,10 +170,10 @@ void AFoliageCaptureActor::BuildFoliageTransforms(UTextureRenderTarget2D* Foliag
 				const FVector GeographicCoords = PixelToGeographicLocation(X, Y, Elevation, FoliageDistributionMap,
 					GeographicExtents2D);
 				// Then project to UE world coordinates
-				FVector Location = Georeference->TransformLongitudeLatitudeHeightToUnreal(GeographicCoords);
+				FVector Location = Georeference->InaccurateTransformLongitudeLatitudeHeightToUnreal(GeographicCoords);
 
 				// Compute east north up
-				const FMatrix EastNorthUpEngine = Georeference->ComputeEastNorthUpToUnreal(Location);
+				const FMatrix EastNorthUpEngine = Georeference->InaccurateComputeEastNorthUpToUnreal(Location);
 
 				for (FFoliageClassificationType& FoliageType : FoliageTypes)
 				{
@@ -355,7 +355,7 @@ void AFoliageCaptureActor::OnUpdate_Implementation(const FVector& NewLocation)
 	bInstancesClearedCalled = false;
 	
 
-	const FRotator PlanetAlignedRotation = Georeference->ComputeEastNorthUpToUnreal(NewLocation).Rotator();
+	const FRotator PlanetAlignedRotation = Georeference->InaccurateComputeEastNorthUpToUnreal(NewLocation).Rotator();
 
 	SetActorRotation(
 		PlanetAlignedRotation
@@ -388,11 +388,11 @@ void AFoliageCaptureActor::OnUpdate_Implementation(const FVector& NewLocation)
 void AFoliageCaptureActor::OnInstancesCleared_Implementation()
 {
 	if (NewActorLocation.IsSet()) {
-		FVector GeoPosition = Georeference->TransformUnrealToLongitudeLatitudeHeight(
+		FVector GeoPosition = Georeference->InaccurateTransformUnrealToLongitudeLatitudeHeight(
 			*NewActorLocation
 		);
 		GeoPosition.Z = CaptureElevation;
-		FVector EnginePosition = Georeference->TransformLongitudeLatitudeHeightToUnreal(GeoPosition);
+		FVector EnginePosition = Georeference->InaccurateTransformLongitudeLatitudeHeightToUnreal(GeoPosition);
 		ActorOffset = EnginePosition - GetActorLocation();
 
 		SetActorLocation(

@@ -5,6 +5,8 @@
 
 #include "Kismet/KismetMathLibrary.h"
 
+DEFINE_LOG_CATEGORY(LogProceduralFoliage);
+
 // Sets default values
 AFoliageCaptureActor::AFoliageCaptureActor()
 {
@@ -35,7 +37,7 @@ void AFoliageCaptureActor::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
-	if (Ticks > UpdateFoliageAfterNumFrames && !bIsBuilding)
+	if (Ticks > UpdateFoliageAfterNumFrames && (!bIsBuilding || OnInstancesClearedCallback.IsSet()))
 	{
 		Ticks = 0;
 		int32 ComponentsUpdated = 0;
@@ -44,26 +46,23 @@ void AFoliageCaptureActor::Tick(float DeltaTime)
 		{
 			for (UFoliageHISM* FoliageHISM : FoliageHISMPair.Value)
 			{
-				// if (!IsValid(FoliageHISM)) { continue; }
-				if (FoliageHISM->bMarkedForClear)
+				if (FoliageHISM->bMarkedForAdd)
 				{
-#if !FOLIAGE_REDUCE_FLICKER_APPROACH_ENABLED
 					FoliageHISM->ClearInstances();
-					FoliageHISM->bCleared = true;
-					FoliageHISM->bMarkedForClear = false;
-					ComponentsUpdated++;
-#endif
-				}
-				else if (FoliageHISM->bMarkedForAdd)
-				{
-#if FOLIAGE_REDUCE_FLICKER_APPROACH_ENABLED
-					FoliageHISM->ClearInstances();
-#endif
+
 					FoliageHISM->PreAllocateInstancesMemory(FoliageHISM->Transforms.Num());
 					FoliageHISM->AddInstances(FoliageHISM->Transforms, false);
 					FoliageHISM->bMarkedForAdd = false;
 					FoliageHISM->Transforms.Empty();
 					FoliageHISM->bCleared = false;
+					ComponentsUpdated++;
+					
+				} else if (FoliageHISM->bMarkedForClear)
+				{
+					UE_LOG(LogProceduralFoliage, Display, TEXT("HISM marked as clear. clearing..."));
+					FoliageHISM->ClearInstances();
+					FoliageHISM->bMarkedForClear = false;
+					FoliageHISM->bCleared = true;
 					ComponentsUpdated++;
 				}
 				if (ComponentsUpdated > MaxComponentsToUpdatePerFrame)
@@ -79,7 +78,16 @@ void AFoliageCaptureActor::Tick(float DeltaTime)
 
 		if (IsValid(Georeference)) {
 			if (AllISMsMarkedAsCleared() && !bInstancesClearedCalled && IsWaiting()) {
-				OnInstancesCleared();
+				if (OnInstancesClearedCallback.IsSet())
+				{
+					(*OnInstancesClearedCallback)();
+					OnInstancesClearedCallback.Reset();
+					bIsWaiting = false;
+					UE_LOG(LogProceduralFoliage, Display, TEXT("Cleared Instances"));
+				} else
+				{
+					UE_LOG(LogProceduralFoliage, Warning, TEXT("OnInstancesClearedCallback is not set!"));
+				}
 			}
 		}
 	}
@@ -93,17 +101,17 @@ void AFoliageCaptureActor::BuildFoliageTransforms(UTextureRenderTarget2D* Foliag
 	// Need to check whether the CesiumGeoreference actor and input RTs are valid.
 	if (!IsValid(Georeference))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("Georeference is invalid! Not spawning in foliage"));
+		UE_LOG(LogProceduralFoliage, Warning, TEXT("Georeference is invalid! Not spawning in foliage"));
 		return;
 	}
 	if (!IsValid(NormalAndDepthMap) || !IsValid(FoliageDistributionMap))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("Invaid inputs for FoliageCaptureActor!"));
+		UE_LOG(LogProceduralFoliage, Warning, TEXT("Invaid inputs for FoliageCaptureActor!"));
 		return;
 	}
 	if (FoliageTypes.Num() == 0)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("No foliage types added!"));
+		UE_LOG(LogProceduralFoliage, Warning, TEXT("No foliage types added!"));
 		return;
 	}
 
@@ -231,7 +239,7 @@ void AFoliageCaptureActor::BuildFoliageTransforms(UTextureRenderTarget2D* Foliag
 							}
 							if (!IsValid(MinimumHISM))
 							{
-								UE_LOG(LogTemp, Error, TEXT("MinimumHISM is invalid!"));
+								UE_LOG(LogProceduralFoliage, Error, TEXT("MinimumHISM is invalid!"));
 							}
 
 							Location += WorldOffset;
@@ -242,7 +250,7 @@ void AFoliageCaptureActor::BuildFoliageTransforms(UTextureRenderTarget2D* Foliag
 								Location + (Rotation.Quaternion().
 									GetUpVector() * FoliageGeometryType.ZOffset.
 									Interpolate(FMath::FRand())), FVector(Scale)
-							).GetRelativeTransform(GetTransform());
+							).GetRelativeTransform(NextTransform);
 
 							if (NewTransform.IsRotationNormalized())
 							{
@@ -263,16 +271,21 @@ void AFoliageCaptureActor::BuildFoliageTransforms(UTextureRenderTarget2D* Foliag
 			delete NormalPixels;
 			ClassificationPixels = nullptr;
 			NormalPixels = nullptr;
-
+			
 			AsyncTask(ENamedThreads::GameThread, [FoliageTransforms, this]()
 				{
-					// Marked for add
-					for (const TPair<UFoliageHISM*, TArray<FTransform>>& Pair : FoliageTransforms.HISMTransformMap)
-					{
-						Pair.Key->Transforms.Append(Pair.Value);
-						Pair.Key->bMarkedForAdd = true;
-					}
-					bIsBuilding = false;
+					ClearFoliageInstances_Internal(
+						[FoliageTransforms, this]()
+						{
+							SetActorTransform(NextTransform);
+							// Marked for add
+							for (const TPair<UFoliageHISM*, TArray<FTransform>>& Pair : FoliageTransforms.HISMTransformMap)
+							{
+								Pair.Key->Transforms.Append(Pair.Value);
+								Pair.Key->bMarkedForAdd = true;
+							}
+							bIsBuilding = false;
+						});
 				});
 		});
 	// Extract the pixels from the render targets, calling OnRenderTargetRead when complete.
@@ -282,22 +295,6 @@ void AFoliageCaptureActor::BuildFoliageTransforms(UTextureRenderTarget2D* Foliag
 	}, TArray<TArray<FLinearColor>*>{
 		ClassificationPixels, NormalPixels
 	});
-}
-
-void AFoliageCaptureActor::ClearFoliageInstances()
-{
-	// Ensure the transforms array on the HISMs are cleared before building.
-	for (TPair<FFoliageGeometryType, TArray<UFoliageHISM*>>& FoliageHISMPair : HISMFoliageMap)
-	{
-		for (UFoliageHISM* FoliageHISM : FoliageHISMPair.Value)
-		{
-			if (IsValid(FoliageHISM))
-			{
-				FoliageHISM->Transforms.Empty();
-				FoliageHISM->bMarkedForClear = true;
-			}
-		}
-	}
 }
 
 void AFoliageCaptureActor::ResetAndCreateHISMComponents()
@@ -357,14 +354,23 @@ void AFoliageCaptureActor::OnUpdate_Implementation(const FVector& NewLocation)
 
 	const FRotator PlanetAlignedRotation = Georeference->ComputeEastNorthUpToUnreal(NewLocation).Rotator();
 
+	/*
 	SetActorRotation(
 		PlanetAlignedRotation
+	);
+	*/
+
+	NextTransform.SetRotation(
+		PlanetAlignedRotation.Quaternion()
+	);
+	NextTransform.SetLocation(
+		NewLocation
 	);
 
 	// Get grid min and max coords.
 	const int32 Size = GridSize.X > 0 ? GridSize.X : 1;
-	const FVector Start = GetActorTransform().TransformPosition(FVector(-(CaptureWidth * Size) / 2, 0, 0));
-	const FVector End = GetActorTransform().TransformPosition(FVector((CaptureWidth * Size) / 2, 0, 0));
+	const FVector Start = NextTransform.TransformPosition(FVector(-(CaptureWidth * Size) / 2, 0, 0));
+	const FVector End = NextTransform.TransformPosition(FVector((CaptureWidth * Size) / 2, 0, 0));
 
 	// Find the distance (in degrees) between the grid min and max.
 	glm::dvec3 GeoStart = Georeference->TransformUnrealToLongitudeLatitudeHeight(VectorToDVector(Start));
@@ -373,39 +379,8 @@ void AFoliageCaptureActor::OnUpdate_Implementation(const FVector& NewLocation)
 	GeoStart.z = CaptureElevation;
 	GeoEnd.z = CaptureElevation;
 
-	CaptureWidthInDegrees = glm::distance(GeoStart, GeoEnd) / 2;
-
+	CaptureWidthInDegrees = distance(GeoStart, GeoEnd) / 2;
 	bIsWaiting = true;
-	
-#if FOLIAGE_REDUCE_FLICKER_APPROACH_ENABLED
-	OnInstancesCleared();
-#else
-	ClearFoliageInstances();
-#endif
-
-}
-
-void AFoliageCaptureActor::OnInstancesCleared_Implementation()
-{
-	if (NewActorLocation.IsSet()) {
-		FVector GeoPosition = Georeference->TransformUnrealToLongitudeLatitudeHeight(
-			*NewActorLocation
-		);
-		GeoPosition.Z = CaptureElevation;
-		FVector EnginePosition = Georeference->TransformLongitudeLatitudeHeightToUnreal(GeoPosition);
-		ActorOffset = EnginePosition - GetActorLocation();
-
-		SetActorLocation(
-		EnginePosition
-		);
-
-#if FOLIAGE_REDUCE_FLICKER_APPROACH_ENABLED
-		OffsetAllInstances(ActorOffset);
-#endif
-
-		NewActorLocation.Reset();
-		bIsWaiting = false;
-	}
 }
 
 bool AFoliageCaptureActor::IsBuilding() const
@@ -515,7 +490,7 @@ void AFoliageCaptureActor::ReadLinearColorPixelsAsync(
 
 	if (!Context.OutData[0])
 	{
-		UE_LOG(LogTemp, Error, TEXT("Buffer invalid!"));
+		UE_LOG(LogProceduralFoliage, Error, TEXT("Buffer invalid!"));
 		return;
 	}
 
@@ -558,4 +533,30 @@ void AFoliageCaptureActor::ReadLinearColorPixelsAsync(
 glm::dvec3 AFoliageCaptureActor::VectorToDVector(const FVector& InVector)
 {
 	return glm::dvec3(InVector.X, InVector.Y, InVector.Z);
+}
+
+void AFoliageCaptureActor::ClearFoliageInstances_Internal(TFunction<void()>&& Callback)
+{
+	OnInstancesClearedCallback = MoveTemp(Callback);
+	bool bAnyHISMs = false;
+	
+	for (TPair<FFoliageGeometryType, TArray<UFoliageHISM*>>& FoliageHISMPair : HISMFoliageMap)
+	{
+		for (UFoliageHISM* FoliageHISM : FoliageHISMPair.Value)
+		{
+			if (IsValid(FoliageHISM))
+			{
+				FoliageHISM->bMarkedForClear = true;
+				bAnyHISMs = true;
+			}
+		}
+	}
+
+	if (!bAnyHISMs)
+	{
+		UE_LOG(LogProceduralFoliage, Display, TEXT("No HISMs, calling callback directly"));
+		(*OnInstancesClearedCallback)();
+		OnInstancesClearedCallback.Reset();
+		bIsWaiting = false;
+	}
 }

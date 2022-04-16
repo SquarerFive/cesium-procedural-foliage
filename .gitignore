@@ -74,3 +74,4 @@ Plugins/*/Intermediate/*
 DerivedDataCache/*
 Config/DefaultEngine.ini
 *.xml
+Config/DefaultEngine.ini

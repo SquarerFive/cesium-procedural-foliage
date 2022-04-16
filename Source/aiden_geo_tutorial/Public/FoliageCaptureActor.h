@@ -12,8 +12,7 @@
 
 #include "FoliageCaptureActor.generated.h"
 
-// EXPERIMENTAL
-#define FOLIAGE_REDUCE_FLICKER_APPROACH_ENABLED 1
+DECLARE_LOG_CATEGORY_EXTERN(LogProceduralFoliage, Log, All);
 
 /**
  * @brief Used to store the reprojected points gathered from the RT.
@@ -201,9 +200,6 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Foliage Spawner")
 	void BuildFoliageTransforms(UTextureRenderTarget2D* FoliageDistributionMap,
 	                            UTextureRenderTarget2D* NormalAndDepthMap, FBox RTWorldBounds);
-	
-	UFUNCTION(BlueprintCallable, Category = "Foliage Spawner")
-	void ClearFoliageInstances();
 
 	/**
 	 * @brief Create required HISM components, removing if outdated
@@ -215,9 +211,6 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, BlueprintNativeEvent, Category = "Foliage Spawner")
 	void OnUpdate(const FVector& NewLocation);
-
-	UFUNCTION(BlueprintCallable, BlueprintNativeEvent, Category = "Foliage Spawner")
-	void OnInstancesCleared();
 
 	/**
 	 * @brief Is the foliage currently building?
@@ -323,6 +316,12 @@ protected:
 	* @brief Offset between last actor position and current actor position.
 	*/
 	FVector ActorOffset = FVector(0.f);
+
+private:
+	TOptional<TFunction<void()>>  OnInstancesClearedCallback;
+	FTransform NextTransform;
+private:
+	void ClearFoliageInstances_Internal(TFunction<void()>&& Callback);
 };
 
 inline int32 AFoliageCaptureActor::GetInstanceCount()
